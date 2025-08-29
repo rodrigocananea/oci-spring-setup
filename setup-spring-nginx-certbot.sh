@@ -5,6 +5,8 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Função para log colorido
@@ -24,6 +26,10 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+log_header() {
+    echo -e "${PURPLE}[HEADER]${NC} $1"
+}
+
 # Função para validar se um comando foi executado com sucesso
 validate_command() {
     if [ $? -eq 0 ]; then
@@ -40,30 +46,30 @@ get_input() {
     local var_name="$2"
     local validation="$3"
     local value
-    
+
     while true; do
         echo -e "${YELLOW}$prompt${NC}"
         read -r value
-        
+
         if [ "$validation" = "required" ] && [ -z "$value" ]; then
             log_error "Este campo é obrigatório!"
             continue
         fi
-        
+
         if [ "$validation" = "email" ]; then
             if [[ ! "$value" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
                 log_error "Email inválido!"
                 continue
             fi
         fi
-        
+
         if [ "$validation" = "domain" ]; then
             if [[ ! "$value" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
                 log_error "Domínio inválido!"
                 continue
             fi
         fi
-        
+
         eval "$var_name='$value'"
         break
     done
@@ -73,7 +79,7 @@ get_input() {
 confirm() {
     local prompt="$1"
     local response
-    
+
     while true; do
         echo -e "${YELLOW}$prompt (s/n):${NC}"
         read -r response
@@ -85,31 +91,283 @@ confirm() {
     done
 }
 
-# Banner inicial
-echo -e "${BLUE}"
-echo "============================================================"
-echo "  Script de Configuração: Spring Boot + Nginx + Certbot   "
-echo "============================================================"
-echo -e "${NC}"
+# Função para detectar o sistema operacional
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$NAME
+        VER=$VERSION_ID
+    elif type lsb_release >/dev/null 2>&1; then
+        OS=$(lsb_release -si)
+        VER=$(lsb_release -sr)
+    elif [ -f /etc/redhat-release ]; then
+        OS="Red Hat Enterprise Linux"
+        VER=$(grep -oE '[0-9]+' /etc/redhat-release | head -1)
+    elif [ -f /etc/debian_version ]; then
+        OS="Debian"
+        VER=$(cat /etc/debian_version)
+    else
+        OS=$(uname -s)
+        VER=$(uname -r)
+    fi
+}
 
-# Verificar se está executando como root ou com sudo
-if [ "$EUID" -eq 0 ]; then
-    log_warning "Este script está sendo executado como root. Certifique-se de que isso é necessário."
+# Função para verificar versão do Ubuntu
+check_ubuntu_version() {
+    if [[ "$OS" == *"Ubuntu"* ]]; then
+        UBUNTU_VERSION=$(echo $VER | cut -d. -f1)
+        if [ "$UBUNTU_VERSION" -lt 22 ]; then
+            log_warning "Você está usando Ubuntu $VER. É recomendado usar Ubuntu 22.04 LTS ou superior."
+            if ! confirm "Deseja continuar mesmo assim?"; then
+                log_error "Script cancelado pelo usuário."
+                exit 1
+            fi
+        else
+            log_success "Ubuntu $VER detectado - versão compatível!"
+        fi
+    else
+        log_warning "Sistema operacional detectado: $OS $VER"
+        log_warning "Este script foi otimizado para Ubuntu 22.04+ mas pode funcionar em outras distribuições."
+        if ! confirm "Deseja continuar?"; then
+            log_error "Script cancelado pelo usuário."
+            exit 1
+        fi
+    fi
+}
+
+# Função para atualizar o sistema
+update_system() {
+    log_info "Atualizando sistema operacional..."
+
+    if [[ "$OS" == *"Ubuntu"* ]] || [[ "$OS" == *"Debian"* ]]; then
+        sudo apt update && sudo apt upgrade -y
+        validate_command "Sistema atualizado com sucesso" "Falha ao atualizar sistema"
+
+        # Instalar dependências básicas
+        sudo apt install -y curl wget gnupg lsb-release ca-certificates
+        validate_command "Dependências básicas instaladas" "Falha ao instalar dependências básicas"
+
+    elif [[ "$OS" == *"CentOS"* ]] || [[ "$OS" == *"Red Hat"* ]] || [[ "$OS" == *"Rocky"* ]]; then
+        sudo yum update -y
+        validate_command "Sistema atualizado com sucesso" "Falha ao atualizar sistema"
+
+        # Instalar dependências básicas
+        sudo yum install -y curl wget gnupg ca-certificates
+        validate_command "Dependências básicas instaladas" "Falha ao instalar dependências básicas"
+
+    else
+        log_warning "Sistema operacional não reconhecido para atualização automática."
+        if confirm "Deseja tentar continuar sem atualizar o sistema?"; then
+            log_info "Continuando sem atualização do sistema..."
+        else
+            exit 1
+        fi
+    fi
+}
+
+# Função para instalar Docker
+install_docker() {
+    log_info "Instalando Docker..."
+
+    if [[ "$OS" == *"Ubuntu"* ]] || [[ "$OS" == *"Debian"* ]]; then
+        # Remover versões antigas
+        sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+
+        # Adicionar repositório oficial do Docker
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+        sudo apt update
+        sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+    elif [[ "$OS" == *"CentOS"* ]] || [[ "$OS" == *"Red Hat"* ]] || [[ "$OS" == *"Rocky"* ]]; then
+        # Remover versões antigas
+        sudo yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
+
+        # Instalar Docker
+        sudo yum install -y yum-utils
+        sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        sudo yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    fi
+
+    validate_command "Docker instalado com sucesso" "Falha ao instalar Docker"
+
+    # Iniciar e habilitar Docker
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    validate_command "Docker iniciado e habilitado" "Falha ao iniciar Docker"
+
+    # Adicionar usuário ao grupo docker
+    sudo usermod -aG docker $USER
+    log_success "Usuário adicionado ao grupo docker"
+    log_warning "Você precisará fazer logout/login ou usar 'newgrp docker' para aplicar as permissões do grupo"
+}
+
+# Função para instalar Docker Compose (standalone)
+install_docker_compose() {
+    log_info "Instalando Docker Compose standalone..."
+
+    # Obter a versão mais recente
+    DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d\" -f4)
+
+    # Download e instalação
+    sudo curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+
+    # Criar link simbólico se necessário
+    sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+
+    validate_command "Docker Compose instalado com sucesso" "Falha ao instalar Docker Compose"
+}
+
+# Função para verificar recursos do sistema
+check_system_requirements() {
+    log_info "Verificando recursos do sistema..."
+
+    # Verificar RAM
+    TOTAL_RAM=$(free -m | awk 'NR==2{printf "%.0f", $2/1024}')
+    if [ "$TOTAL_RAM" -lt 2 ]; then
+        log_warning "Sistema tem ${TOTAL_RAM}GB de RAM. Recomendado: 2GB ou mais."
+    else
+        log_success "RAM disponível: ${TOTAL_RAM}GB"
+    fi
+
+    # Verificar espaço em disco
+    DISK_SPACE=$(df -h / | awk 'NR==2 {print $4}' | sed 's/G//')
+    if [ "${DISK_SPACE%.*}" -lt 10 ]; then
+        log_warning "Espaço disponível em disco: ${DISK_SPACE}G. Recomendado: 10GB ou mais."
+    else
+        log_success "Espaço em disco disponível: ${DISK_SPACE}G"
+    fi
+
+    # Verificar se as portas estão livres
+    if ss -tulpn | grep -q ":80 "; then
+        log_warning "Porta 80 já está em uso. Isso pode causar conflitos com o Nginx."
+    fi
+
+    if ss -tulpn | grep -q ":443 "; then
+        log_warning "Porta 443 já está em uso. Isso pode causar conflitos com o Nginx HTTPS."
+    fi
+}
+
+# Banner inicial melhorado
+echo -e "${CYAN}"
+echo "=================================================================="
+echo "   🚀 Script de Configuração: Spring Boot + Nginx + Certbot     "
+echo "=================================================================="
+echo -e "${NC}"
+echo -e "${BLUE}Desenvolvido por: rodrigocananea${NC}"
+echo -e "${BLUE}Data: $(date '+%d/%m/%Y %H:%M:%S')${NC}"
+echo
+echo -e "${YELLOW}📋 REQUISITOS RECOMENDADOS:${NC}"
+echo "  • Ubuntu 22.04 LTS ou superior"
+echo "  • 2GB+ de RAM"
+echo "  • 10GB+ de espaço em disco"
+echo "  • Domínio apontando para este servidor"
+echo "  • Portas 80 e 443 liberadas"
+echo
+echo -e "${YELLOW}⚠️  IMPORTANTE:${NC}"
+echo "  • Execute este script como usuário não-root com sudo"
+echo "  • Certifique-se de ter backup dos dados importantes"
+echo "  • O script irá instalar/atualizar Docker se necessário"
+echo
+
+if ! confirm "Deseja continuar com a instalação?"; then
+    log_error "Instalação cancelada pelo usuário."
+    exit 0
 fi
+
+# Verificações do sistema
+log_header "=== VERIFICAÇÕES DO SISTEMA ==="
+
+# Detectar SO
+detect_os
+log_info "Sistema operacional detectado: $OS $VER"
+
+# Verificar versão do Ubuntu
+check_ubuntu_version
+
+# Verificar se está executando como root
+if [ "$EUID" -eq 0 ]; then
+    log_error "Este script NÃO deve ser executado como root!"
+    log_error "Execute como usuário normal com privilégios sudo."
+    exit 1
+fi
+
+# Verificar se sudo está disponível
+if ! command -v sudo &> /dev/null; then
+    log_error "sudo não está instalado. Por favor, instale sudo primeiro."
+    exit 1
+fi
+
+# Verificar recursos do sistema
+check_system_requirements
+
+# Atualizar sistema se solicitado
+if confirm "Deseja atualizar o sistema operacional?"; then
+    update_system
+else
+    log_info "Pulando atualização do sistema..."
+fi
+
+# Verificações e instalação do Docker
+log_header "=== VERIFICAÇÃO E INSTALAÇÃO DO DOCKER ==="
 
 # Verificar se o Docker está instalado
 if ! command -v docker &> /dev/null; then
-    log_error "Docker não está instalado. Por favor, instale o Docker primeiro."
-    exit 1
+    log_warning "Docker não está instalado."
+    if confirm "Deseja instalar o Docker automaticamente?"; then
+        install_docker
+    else
+        log_error "Docker é necessário para continuar. Instale manualmente e execute o script novamente."
+        exit 1
+    fi
+else
+    DOCKER_VERSION=$(docker --version | cut -d' ' -f3 | cut -d',' -f1)
+    log_success "Docker já está instalado: $DOCKER_VERSION"
+
+    # Verificar se o Docker está rodando
+    if ! docker info &> /dev/null; then
+        log_info "Iniciando serviço Docker..."
+        sudo systemctl start docker
+        validate_command "Docker iniciado" "Falha ao iniciar Docker"
+    fi
 fi
 
 # Verificar se o Docker Compose está instalado
-if ! command -v docker-compose &> /dev/null; then
-    log_error "Docker Compose não está instalado. Por favor, instale o Docker Compose primeiro."
-    exit 1
+if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
+    log_warning "Docker Compose não está instalado."
+    if confirm "Deseja instalar o Docker Compose automaticamente?"; then
+        install_docker_compose
+    else
+        log_error "Docker Compose é necessário para continuar. Instale manualmente e execute o script novamente."
+        exit 1
+    fi
+else
+    if command -v docker-compose &> /dev/null; then
+        COMPOSE_VERSION=$(docker-compose --version | cut -d' ' -f3 | cut -d',' -f1)
+        log_success "Docker Compose já está instalado: $COMPOSE_VERSION"
+    else
+        COMPOSE_VERSION=$(docker compose version --short)
+        log_success "Docker Compose (plugin) já está instalado: $COMPOSE_VERSION"
+    fi
 fi
 
-log_info "Coletando informações necessárias..."
+# Verificar permissões do Docker
+log_info "Verificando permissões do Docker..."
+if docker ps &> /dev/null; then
+    log_success "Permissões do Docker OK"
+else
+    log_warning "Usuário não tem permissões para usar Docker sem sudo"
+    if confirm "Deseja adicionar o usuário atual ao grupo docker?"; then
+        sudo usermod -aG docker $USER
+        log_success "Usuário adicionado ao grupo docker"
+        log_warning "IMPORTANTE: Faça logout/login ou execute 'newgrp docker' para aplicar as permissões"
+        log_warning "Ou execute o Docker com sudo durante esta sessão"
+    fi
+fi
+
+log_header "=== COLETA DE INFORMAÇÕES ==="
 
 # Coleta de informações
 get_input "Digite o nome da pasta para criar o projeto (será criada em /home/ubuntu/):" PROJECT_NAME "required"
@@ -138,6 +396,23 @@ if confirm "Deseja expor alguma porta para o Spring Boot?"; then
 else
     SPRING_PORTS_CONFIG=""
     SPRING_EXPOSE_CONFIG="expose:\n      - 8080"
+fi
+
+# Resumo das configurações
+echo
+log_header "=== RESUMO DAS CONFIGURAÇÕES ==="
+echo -e "${CYAN}Projeto:${NC} $PROJECT_NAME"
+echo -e "${CYAN}Domínio:${NC} $DOMAIN_NAME"
+echo -e "${CYAN}Rede Docker:${NC} $NETWORK_NAME"
+echo -e "${CYAN}Container Spring:${NC} $CONTAINER_NAME"
+echo -e "${CYAN}Imagem Spring:${NC} $IMAGE_NAME"
+echo -e "${CYAN}Email Certbot:${NC} $EMAIL"
+echo -e "${CYAN}PostgreSQL:${NC} $POSTGRES_USER@$POSTGRES_DB (porta $POSTGRES_PORT)"
+echo
+
+if ! confirm "As configurações estão corretas?"; then
+    log_error "Configuração cancelada pelo usuário."
+    exit 0
 fi
 
 # Criar diretório do projeto
@@ -173,7 +448,7 @@ if [ -n "$ENVIRONMENTS" ]; then
     done
 fi
 
-log_info "=== PASSO 1: Configuração inicial para geração de certificados SSL ==="
+log_header "=== PASSO 1: Configuração inicial para geração de certificados SSL ==="
 
 # Criar docker-compose.yml inicial
 log_info "Criando docker-compose.yml inicial..."
@@ -226,9 +501,15 @@ server {
 EOF
 validate_command "Configuração inicial do Nginx criada" "Falha ao criar configuração inicial do Nginx"
 
+# Determinar comando do Docker Compose
+COMPOSE_CMD="docker-compose"
+if ! command -v docker-compose &> /dev/null; then
+    COMPOSE_CMD="docker compose"
+fi
+
 # Subir containers iniciais
 log_info "Subindo containers iniciais..."
-docker-compose up -d
+$COMPOSE_CMD up -d
 validate_command "Containers iniciais iniciados" "Falha ao iniciar containers iniciais"
 
 # Aguardar containers iniciarem
@@ -237,22 +518,20 @@ sleep 10
 
 # Gerar certificados SSL
 log_info "Gerando certificados SSL com Certbot..."
-docker run --rm \
+if docker run --rm \
     -v "$(pwd)/nginx/certbot:/var/www/certbot" \
     -v "$(pwd)/nginx/certbot-etc:/etc/letsencrypt" \
     certbot/certbot certonly --webroot \
     -w /var/www/certbot \
     -d "$DOMAIN_NAME" \
-    --email "$EMAIL" --agree-tos --no-eff-email
-
-if [ $? -eq 0 ]; then
+    --email "$EMAIL" --agree-tos --no-eff-email; then
     log_success "Certificados SSL gerados com sucesso"
 else
     log_error "Falha ao gerar certificados SSL. Verifique se o domínio está apontando para este servidor."
     log_info "Continuando mesmo assim para configurar o ambiente..."
 fi
 
-log_info "=== PASSO 2: Configuração final para servir o App Spring Boot ==="
+log_header "=== PASSO 2: Configuração final para servir o App Spring Boot ==="
 
 # Atualizar configuração do Nginx
 log_info "Atualizando configuração do Nginx para HTTPS..."
@@ -360,10 +639,10 @@ validate_command "docker-compose.yml final criado" "Falha ao criar docker-compos
 
 # Reiniciar serviços
 log_info "Reiniciando serviços com nova configuração..."
-docker-compose down
+$COMPOSE_CMD down
 validate_command "Containers parados" "Falha ao parar containers"
 
-docker-compose up -d
+$COMPOSE_CMD up -d
 validate_command "Containers reiniciados" "Falha ao reiniciar containers"
 
 # Aguardar serviços iniciarem
@@ -371,11 +650,11 @@ log_info "Aguardando serviços iniciarem..."
 sleep 15
 
 # Validações finais
-log_info "=== VALIDAÇÕES FINAIS ==="
+log_header "=== VALIDAÇÕES FINAIS ==="
 
 # Verificar se os containers estão rodando
 log_info "Verificando status dos containers..."
-if docker-compose ps | grep -q "Up"; then
+if $COMPOSE_CMD ps | grep -q "Up"; then
     log_success "Containers estão executando"
 else
     log_warning "Alguns containers podem não estar executando corretamente"
@@ -422,18 +701,23 @@ echo
 echo -e "${YELLOW}Próximos passos:${NC}"
 echo "1. Certifique-se de que o DNS do domínio $DOMAIN_NAME aponta para este servidor"
 echo "2. Acesse https://$DOMAIN_NAME para testar o aplicativo"
-echo "3. Monitore os logs com: cd $PROJECT_PATH && docker-compose logs -f"
+echo "3. Monitore os logs com: cd $PROJECT_PATH && $COMPOSE_CMD logs -f"
 echo
 echo -e "${BLUE}Comandos úteis:${NC}"
-echo "- Ver status: cd $PROJECT_PATH && docker-compose ps"
-echo "- Ver logs: cd $PROJECT_PATH && docker-compose logs -f"
-echo "- Parar serviços: cd $PROJECT_PATH && docker-compose down"
-echo "- Iniciar serviços: cd $PROJECT_PATH && docker-compose up -d"
+echo "- Ver status: cd $PROJECT_PATH && $COMPOSE_CMD ps"
+echo "- Ver logs: cd $PROJECT_PATH && $COMPOSE_CMD logs -f"
+echo "- Parar serviços: cd $PROJECT_PATH && $COMPOSE_CMD down"
+echo "- Iniciar serviços: cd $PROJECT_PATH && $COMPOSE_CMD up -d"
 echo
 
 # Salvar configurações em arquivo de resumo
 cat > "$PROJECT_PATH/CONFIGURACAO.md" << EOF
 # Configuração do Ambiente
+
+## Informações do Sistema
+- **SO**: $OS $VER
+- **Data da Instalação**: $(date '+%d/%m/%Y %H:%M:%S')
+- **Usuário**: $USER
 
 ## Informações do Projeto
 - **Diretório**: $PROJECT_PATH
@@ -458,16 +742,16 @@ cat > "$PROJECT_PATH/CONFIGURACAO.md" << EOF
 cd $PROJECT_PATH
 
 # Ver status dos containers
-docker-compose ps
+$COMPOSE_CMD ps
 
 # Ver logs
-docker-compose logs -f
+$COMPOSE_CMD logs -f
 
 # Parar serviços
-docker-compose down
+$COMPOSE_CMD down
 
 # Iniciar serviços
-docker-compose up -d
+$COMPOSE_CMD up -d
 
 # Renovar certificados SSL
 docker run --rm -v "\$(pwd)/nginx/certbot:/var/www/certbot" -v "\$(pwd)/nginx/certbot-etc:/etc/letsencrypt" certbot/certbot renew
@@ -484,6 +768,55 @@ $PROJECT_NAME/
 │   └── certbot-etc/
 └── CONFIGURACAO.md
 \`\`\`
+
+## Troubleshooting
+- **Containers não iniciam**: Verifique logs com \`$COMPOSE_CMD logs\`
+- **SSL não funciona**: Verifique se o domínio aponta para o servidor
+- **Aplicação não carrega**: Verifique se a imagem existe e se as variáveis de ambiente estão corretas
 EOF
 
 log_success "Arquivo de configuração salvo em: $PROJECT_PATH/CONFIGURACAO.md"
+
+# Criar script de manutenção
+cat > "$PROJECT_PATH/manutencao.sh" << EOF
+#!/bin/bash
+
+# Script de manutenção para $PROJECT_NAME
+cd "$PROJECT_PATH"
+
+case \$1 in
+    "start")
+        echo "Iniciando serviços..."
+        $COMPOSE_CMD up -d
+        ;;
+    "stop")
+        echo "Parando serviços..."
+        $COMPOSE_CMD down
+        ;;
+    "restart")
+        echo "Reiniciando serviços..."
+        $COMPOSE_CMD down && $COMPOSE_CMD up -d
+        ;;
+    "logs")
+        $COMPOSE_CMD logs -f
+        ;;
+    "status")
+        $COMPOSE_CMD ps
+        ;;
+    "renew-ssl")
+        echo "Renovando certificados SSL..."
+        docker run --rm -v "\$(pwd)/nginx/certbot:/var/www/certbot" -v "\$(pwd)/nginx/certbot-etc:/etc/letsencrypt" certbot/certbot renew
+        $COMPOSE_CMD restart nginx
+        ;;
+    *)
+        echo "Uso: \$0 {start|stop|restart|logs|status|renew-ssl}"
+        ;;
+esac
+EOF
+
+chmod +x "$PROJECT_PATH/manutencao.sh"
+log_success "Script de manutenção criado: $PROJECT_PATH/manutencao.sh"
+
+echo
+echo -e "${CYAN}🎉 Instalação concluída com sucesso!${NC}"
+echo -e "${YELLOW}📝 Não esqueça de fazer logout/login para aplicar as permissões do Docker (se necessário)${NC}"
